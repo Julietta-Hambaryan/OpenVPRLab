@@ -50,7 +50,11 @@ class DinoV3(nn.Module):
     def forward(self, x):
         # x: (B, 3, H, W) — ImageNet-normalised
         features = self.model(x)
-        spatial  = features[-1]   # (B, C, H//32, W//32)
+        spatial  = features[-1]   # timm ConvNeXt: (B, H, W, C) channels-last
+
+        # Convert to channels-first (B, C, H, W) as expected by all aggregators
+        if spatial.shape[-1] == self.out_channels:
+            spatial = spatial.permute(0, 3, 1, 2).contiguous()
 
         if self.return_cls_token:
             cls = spatial.mean(dim=[2, 3])   # (B, C) — global avg pool
