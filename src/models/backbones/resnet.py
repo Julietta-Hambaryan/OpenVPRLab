@@ -1,108 +1,104 @@
-# ----------------------------------------------------------------------------
-# Copyright (c) 2024 Amar Ali-bey
-#
-# OpenVPRLab: https://github.com/amaralibey/OpenVPRLab
-#
-# Licensed under the MIT License. See LICENSE file in the project root.
-# ----------------------------------------------------------------------------
-
-import torch.nn as nn
 import torch
+import torch.nn as nn
 import torchvision
 
-class ResNet(nn.Module):
-    AVAILABLE_MODELS = {
-        "resnet18": torchvision.models.resnet18,
-        "resnet34": torchvision.models.resnet34,
-        "resnet50": torchvision.models.resnet50,
-        "resnet101": torchvision.models.resnet101,
-        "resnet152": torchvision.models.resnet152,
-        "resnext50": torchvision.models.resnext50_32x4d,
-    }
 
+class ResNet(nn.Module):
     def __init__(
         self,
-        backbone_name="resnet50",
+        model_name="resnet50",
         pretrained=True,
-        crop_last_block=True,
-        num_unfrozen_blocks=1,
+        layers_to_freeze=2,
+        layers_to_crop=[],
     ):
-        """Class representing the resnet backbone used in the pipeline.
-        
+        """Class representing the resnet backbone used in the pipeline
+        we consider resnet network as a list of 5 blocks (from 0 to 4),
+        layer 0 is the first conv+bn and the other layers (1 to 4) are the rest of the residual blocks
+        we don't take into account the global pooling and the last fc
+
         Args:
-            backbone_name (str): The architecture of the resnet backbone to instantiate.
-            pretrained (bool): Whether the model is pretrained or not.
-            num_unfrozen_blocks (int): The number of residual blocks to unfreeze (starting from the end).
-            crop_last_block (bool): Whether to crop the last residual block.
-        
+            model_name (str, optional): The architecture of the resnet backbone to instanciate. Defaults to 'resnet50'.
+            pretrained (bool, optional): Whether pretrained or not. Defaults to True.
+            layers_to_freeze (int, optional): The number of residual blocks to freeze (starting from 0) . Defaults to 2.
+            layers_to_crop (list, optional): Which residual layers to crop, for example [3,4] will crop the third and fourth res blocks. Defaults to [].
+
         Raises:
-            ValueError: if the backbone_name corresponds to an unknown architecture.
+            NotImplementedError: if the model_name corresponds to an unknown architecture.
         """
         super().__init__()
-
-        
-
-        self.backbone_name = backbone_name
-        self.pretrained = pretrained
-        self.num_unfrozen_blocks = num_unfrozen_blocks
-        self.crop_last_block = crop_last_block
-
-        if backbone_name not in self.AVAILABLE_MODELS:
-            raise ValueError(f"Backbone {backbone_name} is not recognized!" 
-                             f"Supported backbones are: {list(self.AVAILABLE_MODELS.keys())}")
-
-        # Load the model
-        weights = "IMAGENET1K_V1" if pretrained else None
-        resnet = self.AVAILABLE_MODELS[backbone_name](weights=weights)
-
-        all_layers = [
-            nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool),
-            resnet.layer1,
-            resnet.layer2,
-            resnet.layer3,
-            resnet.layer4,
-        ]
-        
-        if crop_last_block:
-            all_layers.remove(resnet.layer4)
-        nb_layers = len(all_layers)
-
-        # Check if the number of unfrozen blocks is valid
-        assert (
-            isinstance(num_unfrozen_blocks, int) and 0 <= num_unfrozen_blocks <= nb_layers
-        ), f"num_unfrozen_blocks must be an integer between 0 and {nb_layers} (inclusive)"
+        self.model_name = model_name.lower()
+        self.layers_to_freeze = layers_to_freeze
 
         if pretrained:
-            # Split the resnet into frozen and unfrozen parts
-            self.frozen_layers = nn.Sequential(*all_layers[:nb_layers - num_unfrozen_blocks])
-            self.unfrozen_layers = nn.Sequential(*all_layers[nb_layers - num_unfrozen_blocks:])
-            
-            # this is helful to make PyTorch count the right number of trainable params
-            # because it doesn't detect the torch.no_grad() context manager at init time
-            self.frozen_layers.requires_grad_(False)
+            # the new naming of pretrained weights, you can change to V2 if desired.
+            weights = "IMAGENET1K_V1"
         else:
-            # If the model is not pretrained, we keep all layers trainable
-            if self.num_unfrozen_blocks > 0:
-                print("Warning: num_unfrozen_blocks is ignored when pretrained=False. Setting it to 0.")
-                self.num_unfrozen_blocks = 0
-            self.frozen_layers = nn.Identity()
-            self.unfrozen_layers = nn.Sequential(*all_layers)
-        
-        # Calculate the output channels from the last conv layer of the model
-        if backbone_name in ["resnet18", "resnet34"]:
-            self.out_channels = all_layers[-1][-1].conv2.out_channels
+            weights = None
+
+        if "swsl" in model_name or "ssl" in model_name:
+            # These are the semi supervised and weakly semi supervised weights from Facebook
+            self.model = torch.hub.load(
+                "facebookresearch/semi-supervised-ImageNet1K-models", model_name
+            )
         else:
-            self.out_channels = all_layers[-1][-1].conv3.out_channels
-        
-       
+            if "resnext50" in model_name:
+                self.model = torchvision.models.resnext50_32x4d(weights=weights)
+            elif "resnet50" in model_name:
+                self.model = torchvision.models.resnet50(weights=weights)
+            elif "101" in model_name:
+                self.model = torchvision.models.resnet101(weights=weights)
+            elif "152" in model_name:
+                self.model = torchvision.models.resnet152(weights=weights)
+            elif "34" in model_name:
+                self.model = torchvision.models.resnet34(weights=weights)
+            elif "18" in model_name:
+                self.model = torchvision.models.resnet18(weights=weights)
+            elif "wide_resnet50_2" in model_name:
+                self.model = torchvision.models.wide_resnet50_2(weights=weights)
+            else:
+                raise NotImplementedError("Backbone architecture not recognized!")
+
+        # freeze only if the model is pretrained
+        if pretrained:
+            if layers_to_freeze >= 0:
+                self.model.conv1.requires_grad_(False)
+                self.model.bn1.requires_grad_(False)
+            if layers_to_freeze >= 1:
+                self.model.layer1.requires_grad_(False)
+            if layers_to_freeze >= 2:
+                self.model.layer2.requires_grad_(False)
+            if layers_to_freeze >= 3:
+                self.model.layer3.requires_grad_(False)
+
+        # remove the avgpool and most importantly the fc layer
+        self.model.avgpool = None
+        self.model.fc = None
+
+        if 4 in layers_to_crop:
+            self.model.layer4 = None
+        if 3 in layers_to_crop:
+            self.model.layer3 = None
+
+        out_channels = 2048
+        if "34" in model_name or "18" in model_name:
+            out_channels = 512
+
+        self.out_channels = (
+            out_channels // 2 if self.model.layer4 is None else out_channels
+        )
+        self.out_channels = (
+            self.out_channels // 2 if self.model.layer3 is None else self.out_channels
+        )
+
     def forward(self, x):
-        # We use torch.no_grad() to avoid computing gradients for the frozen layers
-        with torch.no_grad():
-            x = self.frozen_layers(x)
-        
-        # Detach the tensor from any computing graph
-        x = x.detach()
-        
-        # Pass the tensor through the unfrozen layers
-        x = self.unfrozen_layers(x)
+        x = self.model.conv1(x)
+        x = self.model.bn1(x)
+        x = self.model.relu(x)
+        x = self.model.maxpool(x)
+        x = self.model.layer1(x)
+        x = self.model.layer2(x)
+        if self.model.layer3 is not None:
+            x = self.model.layer3(x)
+        if self.model.layer4 is not None:
+            x = self.model.layer4(x)
         return x
